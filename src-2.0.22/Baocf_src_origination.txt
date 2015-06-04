@@ -1,0 +1,174 @@
+Libevent的源代码虽然都在一层文件夹下面，但是其代码分类还是相当清晰的，
+主要可分为头文件、内部使用的头文件、辅助功能函数、日志、libevent框架、
+对系统I/O多路复用机制的封装、信号管理、定时事件管理、缓冲区管理、
+基本数据结构和基于libevent的两个实用库等几个部分，有些部分可能就是一个源文件。
+源代码中的test部分就不在我们关注的范畴了。
+    1）头文件
+        主要就是event.h：事件宏定义、接口函数声明，主要结构体event的声明；
+    2）内部头文件
+        xxx-internal.h：内部数据结构和函数，对外不可见，以达到信息隐藏的目的；
+    3）libevent框架
+        event.c：event整体框架的代码实现；
+    4）对系统I/O多路复用机制的封装
+        epoll.c：对epoll的封装；
+        select.c：对select的封装；
+        devpoll.c：对dev/poll的封装;
+        kqueue.c：对kqueue的封装；
+    5）定时事件管理
+        min-heap.h：其实就是一个以时间作为key的小根堆结构；
+    6）信号管理
+        signal.c：对信号事件的处理；
+    7）辅助功能函数
+        evutil.h 和evutil.c：一些辅助功能函数，包括创建socket pair和一些时间操作函数：加、减和比较等。
+    8）日志
+        log.h和log.c：log日志函数
+    9）缓冲区管理
+        evbuffer.c和buffer.c：libevent对缓冲区的封装；
+    10）基本数据结构
+        compat/sys下的两个源文件：queue.h是libevent基本数据结构的实现，包括链表，双向链表，队列等；
+        _libevent_time.h：一些用于时间操作的结构体定义、函数和宏定义；
+    11）实用网络库
+        http和evdns：是基于libevent实现的http服务器和异步dns查询库；
+          堆是一种经典的数据结构，向堆中插入、删除元素时间复杂度都是O(lgN)，N为堆中元素的个数，而获取最小key值（小根堆）的复杂度为O(1)；因此变成了管理Timer事件的绝佳人选（当然是非唯一的），libevent就是采用的堆结构。
+
+
+    Signal是异步事件的经典事例，将Signal事件统一到系统的I/O多路复用中就不像Timer事件那么自然了，Signal事件的出现对于进程来讲是完全随机的，进程不能只是测试一个变量来判别是否发生了一个信号，而是必须告诉内核“在此信号发生时，请执行如下的操作”。
+    如果当Signal发生时，并不立即调用event的callback函数处理信号，而是设法通知系统的I/O机制，让其返回，然后再统一和I/O事件以及Timer一起处理，不就可以了嘛。是的，这也是libevent中使用的方法。
+     问题的核心在于，当Signal发生时，如何通知系统的I/O多路复用机制，这里先买个小关子，放到信号处理一节再详细说明，我想读者肯定也能想出通知的方法，比如使用pipe
+
+
+    ------------------------------------------------------------
+     libevent 接收TCP连接
+     Evconnlistener 机制为您提供了侦听和接受传入的 TCP
+     连接的方法。下面的函数全部包含在`<event2/listener.h>`中。
+
+     evconnlistener
+     创建监听对象
+     struct evconnlistener *evconnlistener_new(struct event_base
+     *base,evconnlistener_cb cb, void *ptr, unsigned flags, int
+     backlog,evutil_socket_t fd);
+     struct evconnlistener *evconnlistener_new_bind(struct event_base
+     *base,evconnlistener_cb cb, void *ptr, unsigned flags, int backlog,const
+     struct sockaddr *sa, int socklen);
+     void evconnlistener_free(struct evconnlistener *lev);
+     两个函数都会申请空间并返回一个新的连接对象`evconnlistener`，其中第一个函数需要自己绑定套接字，而第二个函数会自动绑定套接字。`evconnlistener`根据`event_base`来判断TCP连接请求，每当到来一个请求，它就会调用`evconnlistener_cb`回调函数来处理该请求。`ptr`是回调函数的参数，`backlog`指定了`listen`的个数，而`flag`参数如下：
+
+     * LEV_OPT_LEAVE_SOCKETS_BLOCKING 设置阻塞
+     * LEV_OPT_CLOSE_ON_FREE 释放掉 `evconnlistener`会关闭socket
+     * LEV_OPT_CLOSE_ON_EXEC 
+     * LEV_OPT_REUSEABLE `socket`重用
+     * LEV_OPT_THREADSAFE 为socket增加锁，用于多线程/多进程操作
+     * LEV_OPT_DISABLED
+     * LEV_OPT_DEFERRED_ACCEPT
+     回调函数如下：
+
+     typedef void (*evconnlistener_cb)(struct evconnlistener
+     *listener,evutil_socket_t sock, struct sockaddr *addr, int len, void
+     *ptr)
+     `evconnlistener`为接收连接的`evconnlistener`对象，`sock`为套接字，`addr`和`len`为请求的地址和其长度，`ptr`是传给`evconnlistener_new`的。
+
+     开启和关闭连接监听
+     int evconnlistener_disable(struct evconnlistener *lev);
+     int evconnlistener_enable(struct evconnlistener *lev);
+     改变回调函数
+     void evconnlistener_set_cb(struct evconnlistener *lev, evconnlistener_cb
+     cb, void *arg);
+     检测当前evconnlistener
+     evutil_socket_t evconnlistener_get_fd(struct evconnlistener *lev); /*
+     获取sockfd */
+     struct event_base *evconnlistener_get_base(struct evconnlistener *lev);
+     /* 获取event_base */
+     检测错误
+     typedef void (*evconnlistener_errorcb)(struct evconnlistener *lis, void
+     *ptr);
+     void evconnlistener_set_error_cb(struct evconnlistener *lev,
+     evconnlistener_errorcb errorcb);
+     该函数为错误设置回调函数，每当`listener`发生错误都会触发回调函数的执行。
+
+     bufferevent
+     Libevent的evbuffer功能通过实现一个字节队列，在队列末尾添加数据，在队列头移除数据。
+
+     结构
+     struct bufferevent {
+         struct event_base *ev_base;
+         const struct bufferevent_ops *be_ops;
+         struct event ev_read;
+         struct event ev_write;
+         struct evbuffer *input;
+         struct evbuffer *output;
+         ……
+             bufferevent_data_cb readcb;
+         bufferevent_data_cb writecb;
+         bufferevent_event_cb errorcb;
+         ……
+     };
+     创建基于套接字的bufferevent
+     基于套接字的bufferevent是最简单的，它使用libevent的底层事件机制来检测底层网络套接字是否已经就绪，可以进行读写操作，并且使用底层网络调用（如readv、writev、WSASend、WSARecv）来发送和接收数据。
+
+     struct bufferevent * bufferevent_socket_new(struct event_base *base,
+     evutil_socket_t fd, int options);
+
+     struct bufferevent *bev = bufferevent_socket_new(base, fd,
+     BEV_OPT_CLOSE_ON_FREE); //例子 
+     设置读写回调函数
+     void bufferevent_setcb(struct bufferevent *bufev, bufferevent_data_cb
+     readcb, bufferevent_data_cb writecb, bufferevent_event_cb eventcb, void
+     *cbarg);
+
+     bufferevent_setcb(bev, readcb, NULL, errorcb, NULL); //例子
+     启用事件
+     int bufferevent_enable(struct bufferevent *bufev, short event);
+     bufferevent_enable(bev, EV_READ|EV_WRITE); //例子
+     线程安全
+     默认情况下，多线程同时访问evbuffer是不安全的。如果您需要执行此操作，您可以在evbuffer上调用
+     evbuffer_enable_locking()函数。如果此函数的lock参数为 NULL，则 Libevent
+     通过evthread_set_lock_creation_callback函数分配一把新锁。否则，它所使用的参数作为该锁。
+
+     int evbuffer_enable_locking(struct evbuffer *buf, void *lock);
+     void evbuffer_lock(struct evbuffer *buf);
+     void evbuffer_unlock(struct evbuffer *buf);
+
+
+
+------------------------lushan_start-------------------------------
+     lushan的通信模型是基于libevent这个开源的事件驱动网络库的,
+     因此能进行高效的通信服务. 这一小节先介绍libevent的基本原理,
+     在此基础上才能更好的理解整个lushan的通信流程.
+
+     为了实际处理每个请求, libevent库提供一种事件机制,
+     它作为底层网络后端的包装器.
+     事件系统让连接添加处理函数变得非常简便, 同时降低了底层I/O复杂性,
+     这是libevent系统的核心.
+
+     创建libevent服务器的基本方法是,
+     注册当发生某一操作(比如接受来自客户端的连接)时应该执行的函数,
+     然后调用主事件循环event_dispatch().
+     执行过程的控制现在由libevent系统处理.
+     注册事件和将调用的函数之后, 事件系统开始自治.
+     在应用程序运行时, 可以在事件队列中添加(注册)或删除(取消注册)事件.
+     事件注册非常方便, 可以通过它添加新事件以处理新打开的连接,
+     从而构建灵活的网络处理系统.
+
+     结构体event和event_base是libevent的两个核心数据结构,
+     前者代表一个事件对象, 后者代表整个事件处理框架.
+     libevent通过event对象将将IO事件, 信号事件, 定时器事件进行封装,
+     从而统一处理, 这也是libevent的精妙所在.
+     libevent主循环函数不断检测注册事件, 如果有事件发生, 则将其放入就绪链表,
+     并调用事件的回调函数, 完成业务逻辑处理
+
+     libevent支持的事件
+
+     IO事件: EV_READ EV_WRITE
+     定时事件: EV_TIMEOUT
+     信号事件: EV_SIGNAL
+     辅助选项: EV_PERSIST 表明这是一个永久事件
+     libevent的关键函数
+
+     event_set()创建新的事件结构
+     event_add()在事件队列中添加事件
+     event_dispatch()启动事件队列系统
+     绑定到event的回调函数原型
+
+     typedef void(* event_callback_fn)(evutil_socket_t sockfd, short
+     event_type, void *arg)
+------------------------lushan_end-------------------------------
